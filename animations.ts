@@ -31,6 +31,12 @@ namespace platformer {
             this.renderable = scene.createRenderable(this.sprite.z + 1, (target, camera) => {
                 if (!this.enabled || !this.currentImage) return;
 
+                if (this.sprite.flags & sprites.Flag.Destroyed) {
+                    this.renderable.destroy();
+                    _state().animations.characters.removeElement(this);
+                    return;
+                }
+
                 let drawX = (this.sprite.flags & SpriteFlag.RelativeToCamera) ? 0 : -camera.drawOffsetX;
                 let drawY = (this.sprite.flags & SpriteFlag.RelativeToCamera) ? 0 : -camera.drawOffsetY;
                 switch (_state().gravityDirection) {
@@ -161,6 +167,28 @@ namespace platformer {
             this.sprite.setFlag(SpriteFlag.Invisible, enabled);
         }
 
+        clearAnimations() {
+            this.animations = [];
+            this.current = undefined;
+        }
+
+        clearAnimationsForRule(rule: number) {
+            let toRemove: CharacterAnimation[] = [];
+            for (const animation of this.animations) {
+                if (animation.rule === rule) {
+                    toRemove.push(animation);
+                }
+            }
+
+            for (const animation of toRemove) {
+                this.animations.removeElement(animation);
+            }
+
+            if (this.animations.indexOf(this.current) === -1) {
+                this.current = undefined;
+            }
+        }
+
         protected pickRule(state: number) {
             // If we have multiple animations with the same best score, we
             // want to prioritize the current animation and then the rest
@@ -195,6 +223,10 @@ namespace platformer {
         }
 
         return res;
+    }
+
+    export function _matchesRule(state: number, rule: number) {
+        return !((state & rule) ^ rule);
     }
 
     export class _PlatformerAnimationState {
@@ -233,11 +265,13 @@ namespace platformer {
     //% weight=100
     //% blockGap=8
     //% group="Character Animations"
-    export function loopFrames(sprite: PlatformerSprite, frames: Image[], frameInterval: number, rule: number) {
+    export function loopFrames(sprite: Sprite, frames: Image[], frameInterval: number, rule: number) {
         if (!sprite || !frames || !frames.length || !rule) return;
         if (Number.isNaN(frameInterval) || frameInterval < 5) frameInterval = 5;
 
-        const state = getStateForSprite(sprite, true);
+        _assertPlatformerSprite(sprite);
+
+        const state = getStateForSprite(sprite as PlatformerSprite, true);
         state.setLoopFrames(frames, frameInterval, rule);
     }
 
@@ -264,12 +298,56 @@ namespace platformer {
     //% rule.shadow=arcade_mp_character_make_rule
     //% weight=90
     //% group="Character Animations"
-    export function runFrames(sprite: PlatformerSprite, frames: Image[], frameInterval: number, rule: number) {
+    export function runFrames(sprite: Sprite, frames: Image[], frameInterval: number, rule: number) {
         if (!sprite || !frames || !frames.length || !rule) return;
         if (Number.isNaN(frameInterval) || frameInterval < 5) frameInterval = 5;
 
-        const state = getStateForSprite(sprite, true);
+        _assertPlatformerSprite(sprite);
+
+        const state = getStateForSprite(sprite as PlatformerSprite, true);
         state.setStartFrames(frames, frameInterval, rule);
+    }
+
+    /**
+     * Clears all animations registered for the specified sprite.
+     *
+     * @param sprite The sprite to clear animations for
+     */
+    //% blockId=arcade_mp_character_clear_animations
+    //% block="$sprite clear all animations"
+    //% sprite.defl=mySprite
+    //% sprite.shadow=variables_get
+    //% weight=80
+    //% blockGap=8
+    //% group="Character Animations"
+    export function clearAnimations(sprite: Sprite) {
+        _assertPlatformerSprite(sprite);
+
+        const state = getStateForSprite(sprite as PlatformerSprite, false);
+        state.clearAnimations();
+    }
+
+
+    /**
+     * Clears all animations registered for the specified sprite with the given rule.
+     * This removes both looping animations and animations that run once a rule becomes
+     * true.
+     *
+     * @param sprite The sprite to clear animations for
+     * @param rule The rule to clear animations for
+     */
+    //% blockId=arcade_mp_character_clear_animations_for_rule
+    //% block="$sprite clear all animations for rule $rule"
+    //% sprite.defl=mySprite
+    //% sprite.shadow=variables_get
+    //% rukle.shadow=arcade_mp_character_make_rule
+    //% weight=70
+    //% group="Character Animations"
+    export function clearAnimationsForRule(sprite: Sprite, rule: number) {
+        _assertPlatformerSprite(sprite);
+
+        const state = getStateForSprite(sprite as PlatformerSprite, false);
+        state.clearAnimationsForRule(rule);
     }
 
 
@@ -285,11 +363,13 @@ namespace platformer {
     //% block="$sprite enable character animations $enabled"
     //% sprite.defl=mySprite
     //% sprite.shadow=variables_get
-    //% weight=70
+    //% weight=50
     //% blockGap=8
     //% group="Character Animations"
-    export function setCharacterAnimationsEnabled(sprite: PlatformerSprite, enabled: boolean) {
-        const state = getStateForSprite(sprite, false);
+    export function setCharacterAnimationsEnabled(sprite: Sprite, enabled: boolean) {
+        _assertPlatformerSprite(sprite);
+
+        const state = getStateForSprite(sprite as PlatformerSprite, false);
         if (!state) return;
 
         state.setEnabled(enabled);

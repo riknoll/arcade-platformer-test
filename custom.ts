@@ -35,6 +35,24 @@ namespace platformer {
         }
     }
 
+    export class EventHandler {
+        constructor(public rule: number, public condition: EventHandlerCondition, public handler: (sprite: Sprite) => void) {
+        }
+
+        maybeRun(sprite: PlatformerSprite) {
+            if (this.condition === EventHandlerCondition.BecomesTrue) {
+                if (!_matchesRule(sprite.sFlags, this.rule) && _matchesRule(sprite.previousSFlags, this.rule)) {
+                    this.handler(sprite);
+                }
+            }
+            else if (this.condition === EventHandlerCondition.BecomesFalse) {
+                if (_matchesRule(sprite.sFlags, this.rule) && !_matchesRule(sprite.previousSFlags, this.rule)) {
+                    this.handler(sprite);
+                }
+            }
+        }
+    }
+
     function createDefaultConstants() {
         const res = new PlatformerConstants();
         res.setValue(PlatformerConstant.JumpGracePeriodMillis, 100)
@@ -60,8 +78,12 @@ namespace platformer {
         lastOnGroundTime: number;
         lastOnWallTime: number;
         player: controller.Controller;
+        moving: MovingDirection;
+        dashEndTime: number;
+        previousSFlags: number;
 
         constants: PlatformerConstants;
+        eventHandlers: EventHandler[];
 
         constructor(img: Image) {
             super(img);
@@ -113,6 +135,41 @@ namespace platformer {
 
             }
         }
+
+        setMoving(direction: MovingDirection) {
+            switch (direction) {
+                case MovingDirection.Left:
+                case MovingDirection.Right:
+                    this.moving = direction;
+                    break;
+                default:
+                    this.moving = MovingDirection.None;
+                    break;
+            }
+        }
+
+        jump(pixels: number) {
+            startJump(
+                this,
+                _state().gravity,
+                _state().gravityDirection,
+                pixels
+            );
+        }
+
+        runEventHandlers() {
+            if (!this.eventHandlers) return;
+            for (const handler of this.eventHandlers) {
+                handler.maybeRun(this);
+            }
+        }
+
+        addEventHandler(rule: number, condition: EventHandlerCondition, handler: (sprite: Sprite) => void) {
+            if (!this.eventHandlers) {
+                this.eventHandlers = [];
+            }
+            this.eventHandlers.push(new EventHandler(rule, condition, handler));
+        }
     }
 
     let stateStack: PlatformerState[];
@@ -130,6 +187,7 @@ namespace platformer {
         aButtonIsPressed: boolean[];
 
         animations: _PlatformerAnimationState;
+        handlers: EventHandler[];
 
         constructor() {
             this.gravity = 500;
@@ -137,6 +195,7 @@ namespace platformer {
 
             this.allSprites = [];
             this.animations = new _PlatformerAnimationState();
+            this.handlers = [];
 
             game.currentScene().eventContext.registerFrameHandler(scene.CONTROLLER_SPRITES_PRIORITY, () => {
                 this.moveSprites();
@@ -151,7 +210,6 @@ namespace platformer {
                 ctrl.A.addEventListener(ControllerButtonEvent.Pressed, () => {
                     this.aButtonIsPressed[index] = true;
                     this.aButtonTimer[index] = game.runtime();
-                    console.log(index);
                 });
 
                 ctrl.A.addEventListener(ControllerButtonEvent.Released, () => {
@@ -187,7 +245,6 @@ namespace platformer {
             this.setTemplateFlag(PlatformerFlags.JumpOnAPressed, true)
             this.setTemplateFlag(PlatformerFlags.CoyoteTime, true)
             this.setTemplateFlag(PlatformerFlags.MovementMomentum, true)
-            this.setTemplateFlag(PlatformerFlags.WallJumps, true)
         }
 
         setGravity(strength: number, direction: Direction) {
@@ -204,6 +261,7 @@ namespace platformer {
 
             const dtMs = control.eventContext().deltaTimeMillis;
             for (const sprite of this.allSprites) {
+                sprite.previousSFlags = sprite.sFlags;
                 let vx = 0;
                 let vy = 0;
 
@@ -214,7 +272,23 @@ namespace platformer {
 
                 const ctrl = sprite.player;
 
-                if (ctrl && sprite.pFlags & PlatformerFlags.ControlsEnabled) {
+                if (sprite.moving === MovingDirection.Left) {
+                    svx = -256;
+                    svy = 0;
+                }
+                else if (sprite.moving === MovingDirection.Right) {
+                    svx = 256;
+                    svy = 0;
+                }
+                else if (sprite.moving === MovingDirection.Up) {
+                    svx = 0;
+                    svy = -256;
+                }
+                else if (sprite.moving === MovingDirection.Down) {
+                    svx = 0;
+                    svy = 256;
+                }
+                else if (ctrl && sprite.pFlags & PlatformerFlags.ControlsEnabled) {
                     if (ctrl.analog) {
                         svx = (ctrl.right.pressureLevel() - ctrl.left.pressureLevel()) >> 1
                         svy = (ctrl.down.pressureLevel() - ctrl.up.pressureLevel()) >> 1
@@ -228,27 +302,31 @@ namespace platformer {
                     svy = 0;
                 }
 
-                if (sprite.pFlags & PlatformerFlags.MovementMomentum) {
-                    if (this.gravityDirection === Direction.Up || this.gravityDirection === Direction.Down) {
-                        vx = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
-                        svy = 0;
-                    }
-                    else {
-                        vy = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
-                        svx = 0;
-                    }
 
+                if (this.gravityDirection === Direction.Up || this.gravityDirection === Direction.Down) {
+                    vx = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
+                    svy = 0;
+                }
+                else {
+                    vy = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
+                    svx = 0;
+                }
+
+
+                if (sprite.pFlags & PlatformerFlags.MovementMomentum) {
                     const acc = Fx8(sprite.constants.lookupValue(PlatformerConstant.MovementAcceleration));
                     sprite.setStateFlag(PlatformerSpriteState.Turning, false);
                     sprite.setStateFlag(PlatformerSpriteState.Decelerating, false);
                     sprite.setStateFlag(PlatformerSpriteState.Accelerating, false);
                     sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, false);
+                    sprite.setStateFlag(PlatformerSpriteState.AboveMaxSpeed, false);
                     if (svx || svy) {
                         if (vx) {
-                            if (vx > 0 && sprite.vx > vx || vx < 0 && sprite.vx < vx) {
+                            if (sprite.vx > 0 && sprite.vx > vx && svx > 0 || sprite.vx < 0 && sprite.vx < -vx && svx < 0) {
+                                // we're going too fast, need to slow down
                                 const friction = Fx.idiv(
                                     Fx.imul(
-                                        acc,
+                                        Fx8(isOnGround(sprite, this.gravityDirection) ? sprite.constants.lookupValue(PlatformerConstant.GroundFriction) : sprite.constants.lookupValue(PlatformerConstant.AirFriction)),
                                         dtMs
                                     ),
                                     1000
@@ -256,16 +334,22 @@ namespace platformer {
 
                                 const c = Fx.compare(sprite._vx, Fx.zeroFx8);
                                 if (c < 0) { // v < f, v += f
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
-                                    sprite._vx = Fx.min(Fx.zeroFx8, Fx.add(sprite._vx, friction));
+                                    sprite._vx = Fx.min(Fx8(-vx), Fx.add(sprite._vx, friction));
                                 }
                                 else if (c > 0) { // v > f, v -= f
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
-                                    sprite._vx = Fx.max(Fx.zeroFx8, Fx.sub(sprite._vx, friction));
+                                    sprite._vx = Fx.max(Fx8(vx), Fx.sub(sprite._vx, friction));
+                                }
+
+                                if (svx > 0) {
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vx === vx);
                                 }
                                 else {
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, false);
-                                    sprite._vx = Fx.zeroFx8
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vx === -vx);
+                                }
+
+                                if (!sprite.hasState(PlatformerSpriteState.MaxRunningSpeed)) {
+                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
+                                    sprite.setStateFlag(PlatformerSpriteState.AboveMaxSpeed, true);
                                 }
 
                                 sprite.setPlatformerFlag(PlatformerFlags.InputLastFrame, false);
@@ -282,12 +366,12 @@ namespace platformer {
                                     )
                                 );
 
-                                sprite.vx = Math.constrain(sprite.vx, -vx, vx);
-
                                 if (svx > 0) {
+                                    sprite.vx = Math.min(sprite.vx, vx);
                                     sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vx === vx);
                                 }
                                 else {
+                                    sprite.vx = Math.max(sprite.vx, -vx);
                                     sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vx === -vx);
                                 }
 
@@ -300,11 +384,13 @@ namespace platformer {
                                     }
                                 }
                             }
-                        } else if (vy) {
-                            if (vy > 0 && sprite.vy > vy || vy < 0 && sprite.vy < vy) {
+                        }
+                        else if (vy) {
+                            if (sprite.vy > 0 && sprite.vy > vy && svy > 0 || sprite.vy < 0 && sprite.vy < -vy && svy < 0) {
+                                // we're going too fast, need to slow down
                                 const friction = Fx.idiv(
                                     Fx.imul(
-                                        acc,
+                                        Fx8(isOnGround(sprite, this.gravityDirection) ? sprite.constants.lookupValue(PlatformerConstant.GroundFriction) : sprite.constants.lookupValue(PlatformerConstant.AirFriction)),
                                         dtMs
                                     ),
                                     1000
@@ -312,16 +398,22 @@ namespace platformer {
 
                                 const c = Fx.compare(sprite._vy, Fx.zeroFx8);
                                 if (c < 0) { // v < f, v += f
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
-                                    sprite._vy = Fx.min(Fx.zeroFx8, Fx.add(sprite._vy, friction));
+                                    sprite._vy = Fx.min(Fx8(-vy), Fx.add(sprite._vy, friction));
                                 }
                                 else if (c > 0) { // v > f, v -= f
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
-                                    sprite._vy = Fx.max(Fx.zeroFx8, Fx.sub(sprite._vy, friction));
+                                    sprite._vy = Fx.max(Fx8(vy), Fx.sub(sprite._vy, friction));
+                                }
+
+                                if (svy > 0) {
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vy === vy);
                                 }
                                 else {
-                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, false);
-                                    sprite._vy = Fx.zeroFx8
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vy === -vy);
+                                }
+
+                                if (!sprite.hasState(PlatformerSpriteState.MaxRunningSpeed)) {
+                                    sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
+                                    sprite.setStateFlag(PlatformerSpriteState.AboveMaxSpeed, true);
                                 }
 
                                 sprite.setPlatformerFlag(PlatformerFlags.InputLastFrame, false);
@@ -338,9 +430,24 @@ namespace platformer {
                                     )
                                 );
 
-                                sprite.vy = Math.constrain(sprite.vy, -vy, vy);
-                            }
+                                if (svy > 0) {
+                                    sprite.vy = Math.min(sprite.vy, vy);
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vy === vy);
+                                }
+                                else {
+                                    sprite.vy = Math.max(sprite.vy, -vy);
+                                    sprite.setStateFlag(PlatformerSpriteState.MaxRunningSpeed, sprite.vy === -vy);
+                                }
 
+                                if (!sprite.hasState(PlatformerSpriteState.MaxRunningSpeed)) {
+                                    if (Math.sign(sprite.vy) !== Math.sign(svy)) {
+                                        sprite.setStateFlag(PlatformerSpriteState.Turning, true);
+                                    }
+                                    else {
+                                        sprite.setStateFlag(PlatformerSpriteState.Accelerating, true);
+                                    }
+                                }
+                            }
                         }
                         sprite.setPlatformerFlag(PlatformerFlags.InputLastFrame, true);
                     }
@@ -369,7 +476,8 @@ namespace platformer {
                                 sprite._vx = Fx.zeroFx8
                             }
 
-                        } else if (vy) {
+                        }
+                        else if (vy) {
                             const c = Fx.compare(sprite._vy, Fx.zeroFx8);
                             if (c < 0) { // v < f, v += f
                                 sprite.setStateFlag(PlatformerSpriteState.Decelerating, true);
@@ -388,13 +496,6 @@ namespace platformer {
                     }
                 }
                 else {
-                    if (this.gravityDirection === Direction.Up || this.gravityDirection === Direction.Down) {
-                        vx = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
-                    }
-                    else {
-                        vy = sprite.constants.lookupValue(PlatformerConstant.MoveSpeed);
-                    }
-
                     if (sprite.pFlags & PlatformerFlags.InputLastFrame) {
                         if (vx) sprite._vx = Fx.zeroFx8;
                         if (vy) sprite._vy = Fx.zeroFx8;
@@ -458,23 +559,43 @@ namespace platformer {
             }
 
             this.handleJumping();
+
+            for (const sprite of this.allSprites) {
+                if (sprite.flags & sprites.Flag.Destroyed) {
+                    continue;
+                }
+
+                for (const handler of this.handlers) {
+                    handler.maybeRun(sprite);
+                }
+            }
         }
 
         handleJumping() {
             const currentTime = game.runtime();
 
+            const tilemap = game.currentScene().tileMap.data;
             let onGround = false;
             let onWall = false;
             for (const sprite of this.allSprites) {
                 onGround = isOnGround(sprite, this.gravityDirection);
-                onWall = isOnWall(sprite, this.gravityDirection);
+
+                if (!onGround) {
+                    updateWallState(sprite, this.gravityDirection, tilemap);
+                }
+                else {
+                    sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, false);
+                    sprite.setStateFlag(PlatformerSpriteState.OnWallRight, false);
+                }
+
+                onWall = sprite.hasState(PlatformerSpriteState.OnWallLeft | PlatformerSpriteState.OnWallRight);
 
                 if (onGround) {
                     sprite.lastOnGroundTime = game.runtime();
                     sprite.setStateFlag(PlatformerSpriteState.AfterJumpApex, false);
                     sprite.setStateFlag(PlatformerSpriteState.Falling, false);
                 }
-                else if (!sprite.hasState(PlatformerSpriteState.AfterJumpApex) && !sprite.hasState(PlatformerSpriteState.JumpingUp)) {
+                else if (!sprite.hasState(PlatformerSpriteState.AfterJumpApex | PlatformerSpriteState.JumpingUp)) {
                     sprite.setStateFlag(PlatformerSpriteState.Falling, true)
                 }
 
@@ -482,8 +603,6 @@ namespace platformer {
 
                 if (!onWall) {
                     sprite.setGravity(_state().gravity, _state().gravityDirection);
-                    sprite.setStateFlag(PlatformerSpriteState.OnWallRight, false);
-                    sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, false);
                     sprite.setStateFlag(PlatformerSpriteState.WallSliding, false);
                 }
 
@@ -547,9 +666,8 @@ namespace platformer {
                     shouldApplyFriction = shouldApplyFriction && onWall;
 
                     if (onWall) {
-                        sprite.setPlatformerFlag(PlatformerFlags.LastWallLeft, sprite.isHittingTile(CollisionDirection.Left));
+                        sprite.setPlatformerFlag(PlatformerFlags.LastWallLeft, sprite.hasState(PlatformerSpriteState.OnWallLeft));
                     }
-
 
                     if (shouldApplyFriction || ((sprite.pFlags & PlatformerFlags.CoyoteTime) && game.runtime() - sprite.lastOnWallTime < sprite.constants.lookupValue(PlatformerConstant.CoyoteTimeMillis))) {
                         if (sprite.jumpStartTime === undefined || currentTime - sprite.jumpStartTime > sprite.constants.lookupValue(PlatformerConstant.JumpGracePeriodMillis)) {
@@ -581,9 +699,6 @@ namespace platformer {
                             switch (_state().gravityDirection) {
                                 case Direction.Down:
                                 case Direction.Up:
-                                    sprite.setStateFlag(PlatformerSpriteState.OnWallRight, sprite.isHittingTile(CollisionDirection.Right))
-                                    sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, sprite.isHittingTile(CollisionDirection.Left))
-
                                     const c1 = Fx.compare(sprite._vy, friction);
                                     if (c1 < 0) // v < f, v += f
                                         sprite._vy = Fx.min(Fx.zeroFx8, Fx.add(sprite._vy, friction));
@@ -604,9 +719,6 @@ namespace platformer {
                                     break;
                                 case Direction.Left:
                                 case Direction.Right:
-                                    sprite.setStateFlag(PlatformerSpriteState.OnWallRight, sprite.isHittingTile(CollisionDirection.Bottom))
-                                    sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, sprite.isHittingTile(CollisionDirection.Top))
-
                                     const c2 = Fx.compare(sprite._vx, friction);
                                     if (c2 < 0) // v < f, v += f
                                         sprite._vx = Fx.min(Fx.zeroFx8, Fx.add(sprite._vx, friction));
@@ -626,7 +738,7 @@ namespace platformer {
                                     sprite.ax = 0;
                                     break;
                             }
-                            if (sprite.hasState(PlatformerSpriteState.OnWallLeft | PlatformerSpriteState.OnWallRight)) {
+                            if (onWall) {
                                 sprite.setPlatformerFlag(PlatformerFlags.LastWallLeft, sprite.hasState(PlatformerSpriteState.OnWallLeft));
                                 sprite.lastOnWallTime = game.runtime();
                             }
@@ -686,6 +798,10 @@ namespace platformer {
 
         setGlobalConstant(constant: PlatformerConstant, value: number) {
             globalConstants.setValue(constant, value);
+        }
+
+        addEventHandler(rule: number, condition: EventHandlerCondition, handler: (sprite: PlatformerSprite) => void) {
+            this.handlers.push(new EventHandler(rule, condition, handler));
         }
     }
 
@@ -777,16 +893,78 @@ namespace platformer {
         }
     }
 
-    function isOnWall(sprite: Sprite, gravityDir: Direction) {
-        if (isOnGround(sprite, gravityDir)) return false;
+    function updateWallState(sprite: PlatformerSprite, gravityDir: Direction, tilemap: tiles.TileMapData) {
+        let leftDirection: CollisionDirection;
+        let rightDirection: CollisionDirection;
+
         switch (gravityDir) {
             case Direction.Down:
             case Direction.Up:
-                return sprite.isHittingTile(CollisionDirection.Left) || sprite.isHittingTile(CollisionDirection.Right);
+                leftDirection = CollisionDirection.Left;
+                rightDirection = CollisionDirection.Right;
+                break;
             case Direction.Right:
             case Direction.Left:
-                return sprite.isHittingTile(CollisionDirection.Top) || sprite.isHittingTile(CollisionDirection.Bottom);
+                leftDirection = CollisionDirection.Top;
+                rightDirection = CollisionDirection.Bottom;
+                break;
         }
+
+        if (sprite.isHittingTile(leftDirection)) {
+            sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, true);
+            sprite.setStateFlag(PlatformerSpriteState.OnWallRight, false);
+            return;
+        }
+        else if (sprite.isHittingTile(rightDirection)) {
+            sprite.setStateFlag(PlatformerSpriteState.OnWallRight, true);
+            sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, false);
+            return;
+        }
+
+        if (sprite.hasState(PlatformerSpriteState.OnWallLeft)) {
+            if (gravityDir === Direction.Down || gravityDir === Direction.Up) {
+                let left = (sprite.left - 1) >> tilemap.scale;
+                for (let i = sprite.top >> tilemap.scale; i <= (sprite.bottom - 1) >> tilemap.scale; i++) {
+                    if (tilemap.isWall(left, i) || tilemap.isOutsideMap(left, i)) {
+                        sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, true);
+                        return;
+                    }
+                }
+            }
+            else {
+                let top = (sprite.top - 1) >> tilemap.scale;
+                for (let i = sprite.left >> tilemap.scale; i <= (sprite.right - 1) >> tilemap.scale; i++) {
+                    if (tilemap.isWall(i, top) || tilemap.isOutsideMap(i, top)) {
+                        sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, true);
+                        return;
+                    }
+                }
+            }
+            sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, false);
+        }
+
+        if (sprite.hasState(PlatformerSpriteState.OnWallRight)) {
+            if (gravityDir === Direction.Down || gravityDir === Direction.Up) {
+                let right = (sprite.right) >> tilemap.scale;
+                for (let i = sprite.top >> tilemap.scale; i <= (sprite.bottom - 1) >> tilemap.scale; i++) {
+                    if (tilemap.isWall(right, i) || tilemap.isOutsideMap(right, i)) {
+                        sprite.setStateFlag(PlatformerSpriteState.OnWallRight, true);
+                        return;
+                    }
+                }
+            }
+            else {
+                let bottom = (sprite.bottom) >> tilemap.scale;
+                for (let i = sprite.left >> tilemap.scale; i <= (sprite.right - 1) >> tilemap.scale; i++) {
+                    if (tilemap.isWall(i, bottom) || tilemap.isOutsideMap(i, bottom)) {
+                        sprite.setStateFlag(PlatformerSpriteState.OnWallRight, true);
+                        return;
+                    }
+                }
+            }
+        }
+
+        sprite.setStateFlag(PlatformerSpriteState.OnWallRight, false);
     }
 
     function init() {
@@ -809,5 +987,15 @@ namespace platformer {
     export function _state() {
         init();
         return stateStack[stateStack.length - 1];
+    }
+
+    export function _assertPlatformerSprite(sprite: Sprite) {
+        if (!isPlatformerSprite(sprite)) {
+            throw "arcade-platformer functions can only be used on Platformer Sprites!";
+        }
+    }
+
+    export function isPlatformerSprite(sprite: Sprite) {
+        return sprite instanceof PlatformerSprite;
     }
 }

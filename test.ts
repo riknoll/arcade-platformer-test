@@ -15,6 +15,7 @@ let mySprite = platformer.create(img`
     3 3 3 3 3 3 3 3
     3 3 3 3 3 3 3 3
     `, SpriteKind.Player)
+mySprite.setPlatformerFlag(platformer.PlatformerFlags.WallJumps, true);
 scene.cameraFollowSprite(mySprite)
 platformer.setGravity(1000, platformer.Direction.Down)
 platformer.moveSprite(
@@ -22,6 +23,32 @@ platformer.moveSprite(
     true,
     100
 )
+
+platformer.setConstant(mySprite, platformer.PlatformerConstant.WallJumpHeight, 12)
+platformer.setConstant(mySprite, platformer.PlatformerConstant.WallJumpKickoffVelocity, 200)
+
+
+// let testEnemy = platformer.create(img`
+//     2 2 2 2 2
+//     2 2 2 2 2
+//     2 2 2 2 2
+//     2 2 2 2 2
+//     2 2 2 2 2
+// `, SpriteKind.Enemy);
+
+// // testEnemy.setMoving(platformer.MovingDirection.Right);
+// game.onUpdate(() => {
+//     if (testEnemy.hasState(platformer.PlatformerSpriteState.PushingWallRight)) {
+//         // testEnemy.setMoving(platformer.MovingDirection.Left)
+//     }
+//     if (testEnemy.hasState(platformer.PlatformerSpriteState.PushingWallLeft)) {
+//         // testEnemy.setMoving(platformer.MovingDirection.Right)
+//     }
+
+//     if (Math.percentChance(5) && testEnemy.hasState(platformer.PlatformerSpriteState.OnGround)) {
+//         // testEnemy.jump(32);
+//     }
+// });
 
 controller.menu.onEvent(ControllerButtonEvent.Pressed, () => {
     platformer.moveSprite(
@@ -83,6 +110,9 @@ game.onShade(() => {
     }
     if (mySprite.hasState(platformer.PlatformerSpriteState.Decelerating)) {
         printState("Decelerating");
+    }
+    if (mySprite.hasState(platformer.PlatformerSpriteState.AboveMaxSpeed)) {
+        printState("AboveMaxSpeed");
     }
 })
 
