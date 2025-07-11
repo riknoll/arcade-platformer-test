@@ -11,6 +11,8 @@ namespace platformer {
         MovementMomentum = 1 << 8,
         WallJumps = 1 << 9,
         LastWallLeft = 1 << 10,
+        Friction = 1 << 11,
+        Gravity = 1 << 12
     }
 
     class PlatformerConstants {
@@ -40,12 +42,12 @@ namespace platformer {
         }
 
         maybeRun(sprite: PlatformerSprite) {
-            if (this.condition === EventHandlerCondition.BecomesTrue) {
+            if (this.condition === EventHandlerCondition.BecomesFalse) {
                 if (!_matchesRule(sprite.sFlags, this.rule) && _matchesRule(sprite.previousSFlags, this.rule)) {
                     this.handler(sprite);
                 }
             }
-            else if (this.condition === EventHandlerCondition.BecomesFalse) {
+            else if (this.condition === EventHandlerCondition.BecomesTrue) {
                 if (_matchesRule(sprite.sFlags, this.rule) && !_matchesRule(sprite.previousSFlags, this.rule)) {
                     this.handler(sprite);
                 }
@@ -57,15 +59,17 @@ namespace platformer {
         const res = new PlatformerConstants();
         res.setValue(PlatformerConstant.JumpGracePeriodMillis, 100)
         res.setValue(PlatformerConstant.CoyoteTimeMillis, 100)
-        res.setValue(PlatformerConstant.MoveSpeed, 60)
+        res.setValue(PlatformerConstant.MoveSpeed, 100)
         res.setValue(PlatformerConstant.MaxJumpHeight, 40)
         res.setValue(PlatformerConstant.MovementAcceleration, 700)
         res.setValue(PlatformerConstant.GroundFriction, 700)
         res.setValue(PlatformerConstant.AirFriction, 200)
-        res.setValue(PlatformerConstant.WallJumpHeight, 30)
-        res.setValue(PlatformerConstant.WallJumpKickoffVelocity, 100)
+        res.setValue(PlatformerConstant.WallJumpHeight, 16)
+        res.setValue(PlatformerConstant.WallJumpKickoffVelocity, 200)
         res.setValue(PlatformerConstant.WallFriction, 500)
         res.setValue(PlatformerConstant.WallMinVelocity, 50)
+        res.setValue(PlatformerConstant.InAirJumps, 0)
+        res.setValue(PlatformerConstant.InAirJumpHeight, 20)
         return res;
     }
 
@@ -77,6 +81,7 @@ namespace platformer {
         jumpStartTime: number;
         lastOnGroundTime: number;
         lastOnWallTime: number;
+        lastJumpHeight: number;
         player: controller.Controller;
         moving: MovingDirection;
         dashEndTime: number;
@@ -84,6 +89,7 @@ namespace platformer {
 
         constants: PlatformerConstants;
         eventHandlers: EventHandler[];
+        jumpCount: number;
 
         constructor(img: Image) {
             super(img);
@@ -93,6 +99,8 @@ namespace platformer {
             this.pFlags = _state().templateFlags;
             this.constants = new PlatformerConstants(globalConstants);
             this.setStateFlag(PlatformerSpriteState.FacingRight, true);
+            this.lastJumpHeight = 0;
+            this.jumpCount = 0;
         }
 
         setPlatformerFlag(flag: number, enabled: boolean) {
@@ -111,10 +119,16 @@ namespace platformer {
 
         timeToJumpApex() {
             const gravity = Math.abs(_state().gravity);
-            return (1000 * Math.sqrt(2 * this.constants.lookupValue(PlatformerConstant.MaxJumpHeight) * gravity) / gravity) | 0;
+            return (1000 * Math.sqrt(2 * this.lastJumpHeight * gravity) / gravity) | 0;
         }
 
         setGravity(strength: number, direction: Direction) {
+            if (!(this.pFlags & PlatformerFlags.Gravity)) {
+                this.ay = 0;
+                this.ax = 0;
+                return;
+            }
+
             switch (direction) {
                 case Direction.Down:
                     this.ay = strength;
@@ -132,7 +146,6 @@ namespace platformer {
                     this.ay = 0;
                     this.ax = -strength;
                     break;
-
             }
         }
 
@@ -158,8 +171,13 @@ namespace platformer {
         }
 
         runEventHandlers() {
-            if (!this.eventHandlers) return;
-            for (const handler of this.eventHandlers) {
+            if (this.eventHandlers) {
+                for (const handler of this.eventHandlers) {
+                    handler.maybeRun(this);
+                }
+            }
+
+            for (const handler of _state().handlers) {
                 handler.maybeRun(this);
             }
         }
@@ -183,14 +201,16 @@ namespace platformer {
 
         upButtonTimer: number[];
         upButtonIsPressed: boolean[];
+        upButtonIsPressedLastFrame: boolean[];
         aButtonTimer: number[];
         aButtonIsPressed: boolean[];
+        aButtonIsPressedLastFrame: boolean[];
 
         animations: _PlatformerAnimationState;
         handlers: EventHandler[];
 
         constructor() {
-            this.gravity = 500;
+            this.gravity = 1000;
             this.gravityDirection = Direction.Down;
 
             this.allSprites = [];
@@ -203,11 +223,14 @@ namespace platformer {
 
             this.upButtonTimer = [];
             this.upButtonIsPressed = [];
+            this.upButtonIsPressedLastFrame = [];
             this.aButtonTimer = [];
             this.aButtonIsPressed = [];
+            this.aButtonIsPressedLastFrame = [];
 
             let registerHandlers = (ctrl: controller.Controller, index: number) => {
                 ctrl.A.addEventListener(ControllerButtonEvent.Pressed, () => {
+                    this.aButtonIsPressedLastFrame[index] = false;
                     this.aButtonIsPressed[index] = true;
                     this.aButtonTimer[index] = game.runtime();
                 });
@@ -245,6 +268,8 @@ namespace platformer {
             this.setTemplateFlag(PlatformerFlags.JumpOnAPressed, true)
             this.setTemplateFlag(PlatformerFlags.CoyoteTime, true)
             this.setTemplateFlag(PlatformerFlags.MovementMomentum, true)
+            this.setTemplateFlag(PlatformerFlags.Gravity, true)
+            this.setTemplateFlag(PlatformerFlags.Friction, true)
         }
 
         setGravity(strength: number, direction: Direction) {
@@ -261,7 +286,6 @@ namespace platformer {
 
             const dtMs = control.eventContext().deltaTimeMillis;
             for (const sprite of this.allSprites) {
-                sprite.previousSFlags = sprite.sFlags;
                 let vx = 0;
                 let vy = 0;
 
@@ -451,7 +475,7 @@ namespace platformer {
                         }
                         sprite.setPlatformerFlag(PlatformerFlags.InputLastFrame, true);
                     }
-                    else {
+                    else if (sprite.pFlags & PlatformerFlags.Friction) {
                         const frictionAcc = Fx8(isOnGround(sprite, this.gravityDirection) ? sprite.constants.lookupValue(PlatformerConstant.GroundFriction) : sprite.constants.lookupValue(PlatformerConstant.AirFriction))
                         const friction = Fx.idiv(
                             Fx.imul(
@@ -493,6 +517,9 @@ namespace platformer {
                             }
                         }
                         sprite.setPlatformerFlag(PlatformerFlags.InputLastFrame, false);
+                    }
+                    else {
+                        sprite.setStateFlag(PlatformerSpriteState.Decelerating, false);
                     }
                 }
                 else {
@@ -565,10 +592,12 @@ namespace platformer {
                     continue;
                 }
 
-                for (const handler of this.handlers) {
-                    handler.maybeRun(sprite);
-                }
+                sprite.runEventHandlers();
+                sprite.previousSFlags = sprite.sFlags;
             }
+
+            this.aButtonIsPressedLastFrame = this.aButtonIsPressed.slice(0);
+            this.upButtonIsPressedLastFrame = this.upButtonIsPressed.slice(0);
         }
 
         handleJumping() {
@@ -580,7 +609,7 @@ namespace platformer {
             for (const sprite of this.allSprites) {
                 onGround = isOnGround(sprite, this.gravityDirection);
 
-                if (!onGround) {
+                if (!onGround && sprite.pFlags & PlatformerFlags.Gravity) {
                     updateWallState(sprite, this.gravityDirection, tilemap);
                 }
                 else {
@@ -591,6 +620,7 @@ namespace platformer {
                 onWall = sprite.hasState(PlatformerSpriteState.OnWallLeft | PlatformerSpriteState.OnWallRight);
 
                 if (onGround) {
+                    sprite.jumpCount = 0;
                     sprite.lastOnGroundTime = game.runtime();
                     sprite.setStateFlag(PlatformerSpriteState.AfterJumpApex, false);
                     sprite.setStateFlag(PlatformerSpriteState.Falling, false);
@@ -608,6 +638,8 @@ namespace platformer {
 
                 const pIndex = sprite.player ? sprite.player.playerIndex - 1 : 0;
 
+                let didJump = false;
+
                 if (onGround || ((sprite.pFlags & PlatformerFlags.CoyoteTime) && game.runtime() - sprite.lastOnGroundTime < sprite.constants.lookupValue(PlatformerConstant.CoyoteTimeMillis))) {
                     sprite.setPlatformerFlag(PlatformerFlags.CurrentlyJumping, false);
                     sprite.setStateFlag(PlatformerSpriteState.JumpingUp, false);
@@ -617,19 +649,21 @@ namespace platformer {
                             if (currentTime - this.aButtonTimer[pIndex] < sprite.constants.lookupValue(PlatformerConstant.JumpGracePeriodMillis)) {
                                 startJump(sprite, this.gravity, this.gravityDirection, sprite.constants.lookupValue(PlatformerConstant.MaxJumpHeight));
                                 sprite.setPlatformerFlag(PlatformerFlags.JumpStartedWithA, true);
+                                didJump = true;
                             }
                         }
                         if (sprite.pFlags & PlatformerFlags.JumpOnUpPressed && sprite.pFlags & PlatformerFlags.ControlsEnabled) {
                             if (currentTime - this.upButtonTimer[pIndex] < sprite.constants.lookupValue(PlatformerConstant.JumpGracePeriodMillis)) {
                                 startJump(sprite, this.gravity, this.gravityDirection, sprite.constants.lookupValue(PlatformerConstant.MaxJumpHeight));
                                 sprite.setPlatformerFlag(PlatformerFlags.JumpStartedWithA, false);
+                                didJump = true;
                             }
                         }
                     }
                 }
                 else if (sprite.pFlags & PlatformerFlags.CurrentlyJumping) {
                     if (currentTime - sprite.jumpStartTime > sprite.timeToJumpApex()) {
-                        sprite.setPlatformerFlag(PlatformerFlags.CurrentlyJumping, false)
+                        sprite.setPlatformerFlag(PlatformerFlags.CurrentlyJumping, false);
                         sprite.setStateFlag(PlatformerSpriteState.JumpingUp, false);
                         sprite.setStateFlag(PlatformerSpriteState.AfterJumpApex, true);
                     }
@@ -640,6 +674,32 @@ namespace platformer {
                         }
                         if (sprite.pFlags & PlatformerFlags.JumpOnUpPressed && !this.upButtonIsPressed[pIndex] && !(sprite.pFlags & PlatformerFlags.JumpStartedWithA)) {
                             cancelJump(sprite, this.gravityDirection);
+                        }
+                    }
+                }
+
+                if (!didJump && !onGround && !onWall) {
+                    const inAirJumps = sprite.constants.lookupValue(PlatformerConstant.InAirJumps);
+                    if (inAirJumps > 0 && sprite.jumpCount <= inAirJumps) {
+                        if (sprite.pFlags & PlatformerFlags.JumpOnAPressed && sprite.pFlags & PlatformerFlags.ControlsEnabled) {
+                            if (this.aButtonIsPressed[pIndex] && !this.aButtonIsPressedLastFrame[pIndex]) {
+                                // if we were falling
+                                if (sprite.jumpCount === 0) {
+                                    sprite.jumpCount = 1;
+                                }
+                                startJump(sprite, this.gravity, this.gravityDirection, sprite.constants.lookupValue(PlatformerConstant.InAirJumpHeight));
+                                sprite.setPlatformerFlag(PlatformerFlags.JumpStartedWithA, true);
+                            }
+                        }
+                        if (sprite.pFlags & PlatformerFlags.JumpOnUpPressed && sprite.pFlags & PlatformerFlags.ControlsEnabled) {
+                            if (this.upButtonIsPressed[pIndex] && !this.upButtonIsPressedLastFrame[pIndex]) {
+                                // if we were falling
+                                if (sprite.jumpCount === 0) {
+                                    sprite.jumpCount = 1;
+                                }
+                                startJump(sprite, this.gravity, this.gravityDirection, sprite.constants.lookupValue(PlatformerConstant.InAirJumpHeight));
+                                sprite.setPlatformerFlag(PlatformerFlags.JumpStartedWithA, false);
+                            }
                         }
                     }
                 }
@@ -686,7 +746,6 @@ namespace platformer {
                                 }
                             }
                         }
-                        sprite.setPlatformerFlag(PlatformerFlags.CurrentlyJumping, false);
                     }
 
                     // Wall friction
@@ -696,6 +755,9 @@ namespace platformer {
 
                         sprite.setStateFlag(PlatformerSpriteState.WallSliding, shouldApplyFriction);
                         if (shouldApplyFriction) {
+                            sprite.setStateFlag(PlatformerSpriteState.JumpingUp, false);
+                            sprite.setStateFlag(PlatformerSpriteState.AfterJumpApex, false);
+                            sprite.setStateFlag(PlatformerSpriteState.Falling, false);
                             switch (_state().gravityDirection) {
                                 case Direction.Down:
                                 case Direction.Up:
@@ -855,8 +917,12 @@ namespace platformer {
 
         sprite.setPlatformerFlag(PlatformerFlags.CurrentlyJumping, true);
         sprite.setStateFlag(PlatformerSpriteState.JumpingUp, true);
+        sprite.setStateFlag(PlatformerSpriteState.Falling, false);
         sprite.jumpStartTime = game.runtime();
-        sprite.lastOnGroundTime = - sprite.constants.lookupValue(PlatformerConstant.CoyoteTimeMillis)
+        sprite.lastOnGroundTime = - sprite.constants.lookupValue(PlatformerConstant.CoyoteTimeMillis);
+        sprite.lastJumpHeight = jumpHeight;
+        sprite.jumpCount++;
+        sprite.clearObstacles();
     }
 
     function cancelJump(sprite: PlatformerSprite, gravityDir: Direction) {
@@ -921,10 +987,14 @@ namespace platformer {
             return;
         }
 
+        const left = (sprite.left - 1) >> tilemap.scale;
+        const right = sprite.right >> tilemap.scale;
+        const top = (sprite.top - 1) >> tilemap.scale;
+        const bottom = sprite.bottom >> tilemap.scale;
+
         if (sprite.hasState(PlatformerSpriteState.OnWallLeft)) {
             if (gravityDir === Direction.Down || gravityDir === Direction.Up) {
-                let left = (sprite.left - 1) >> tilemap.scale;
-                for (let i = sprite.top >> tilemap.scale; i <= (sprite.bottom - 1) >> tilemap.scale; i++) {
+                for (let i = top; i <= bottom; i++) {
                     if (tilemap.isWall(left, i) || tilemap.isOutsideMap(left, i)) {
                         sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, true);
                         return;
@@ -932,8 +1002,7 @@ namespace platformer {
                 }
             }
             else {
-                let top = (sprite.top - 1) >> tilemap.scale;
-                for (let i = sprite.left >> tilemap.scale; i <= (sprite.right - 1) >> tilemap.scale; i++) {
+                for (let i = left; i <= right; i++) {
                     if (tilemap.isWall(i, top) || tilemap.isOutsideMap(i, top)) {
                         sprite.setStateFlag(PlatformerSpriteState.OnWallLeft, true);
                         return;
@@ -945,8 +1014,7 @@ namespace platformer {
 
         if (sprite.hasState(PlatformerSpriteState.OnWallRight)) {
             if (gravityDir === Direction.Down || gravityDir === Direction.Up) {
-                let right = (sprite.right) >> tilemap.scale;
-                for (let i = sprite.top >> tilemap.scale; i <= (sprite.bottom - 1) >> tilemap.scale; i++) {
+                for (let i = top; i <= bottom; i++) {
                     if (tilemap.isWall(right, i) || tilemap.isOutsideMap(right, i)) {
                         sprite.setStateFlag(PlatformerSpriteState.OnWallRight, true);
                         return;
@@ -954,8 +1022,7 @@ namespace platformer {
                 }
             }
             else {
-                let bottom = (sprite.bottom) >> tilemap.scale;
-                for (let i = sprite.left >> tilemap.scale; i <= (sprite.right - 1) >> tilemap.scale; i++) {
+                for (let i = left; i <= right; i++) {
                     if (tilemap.isWall(i, bottom) || tilemap.isOutsideMap(i, bottom)) {
                         sprite.setStateFlag(PlatformerSpriteState.OnWallRight, true);
                         return;
